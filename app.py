@@ -216,10 +216,12 @@ def serve_csv():
     return Response(latest_csv, mimetype='text/csv',
                     headers={"Cache-Control": "no-cache"})
 
-# Start background thread when the app starts (not on first request, for Render)
-@app.before_first_request
+# Start background thread on first request (Flask 2.3+ compatible)
+@app.before_request
 def start_background():
-    threading.Thread(target=forecast_loop, daemon=True).start()
+    if not hasattr(app, '_forecast_started'):
+        app._forecast_started = True
+        threading.Thread(target=forecast_loop, daemon=True).start()
 
 # Render requires the host to be 0.0.0.0 and uses the PORT env variable
 if __name__ == '__main__':
