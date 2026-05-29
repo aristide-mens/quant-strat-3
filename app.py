@@ -20,9 +20,21 @@ latest_csv = "Loading... (training models)"
 # ==================== All your original functions ====================
 # (copy them exactly as before – they remain unchanged)
 def get_live_data(ticker="AAPL", period="7d", interval="1m"):
-    df = yf.download(ticker, period=period, interval=interval, progress=False)
-    df.columns = df.columns.droplevel(1)
-    return df[['Open','High','Low','Close','Volume']].dropna()
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if df.empty:
+            print(f"Warning: No data returned for {ticker}. Retrying...")
+            time.sleep(2)
+            df = yf.download(ticker, period=period, interval=interval, progress=False)
+        
+        # Handle both MultiIndex and single-level columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        
+        return df[['Open','High','Low','Close','Volume']].dropna()
+    except Exception as e:
+        print(f"Error downloading {ticker}: {e}")
+        return pd.DataFrame()
 
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -39,6 +51,8 @@ def compute_atr(df, period=14):
     return tr.rolling(period).mean()
 
 def compute_features(df):
+    if df.empty:
+        return df
     df = df.copy()
     df['rsi'] = compute_rsi(df['Close'], 14)
     df['ema_fast'] = df['Close'].ewm(span=9).mean()
@@ -192,23 +206,59 @@ def generate_forecast_csv(df_live, models):
 # ==================== Background loop ====================
 def forecast_loop():
     global latest_csv
-    print("Training models...")
-    df_hist = get_live_data("AAPL", period="7d", interval="1m")
-    df_hist = compute_features(df_hist)
-    fixed_horizons = [1, 5, 15, 120, 480, 1440]
-    data = create_multi_horizon_dataset(df_hist, horizons=fixed_horizons)
-    models = train_models(data)
-    print("Models ready. Updating every 15 seconds...")
+    models = None
+    retry_count = 0
+    max_retries = 5
+    
     while True:
         try:
+            if models is None:
+                print("Training models...")
+                retry_count = 0
+                while retry_count < max_retries:
+                    df_hist = get_live_data("AAPL", period="7d", interval="1m")
+                    if df_hist.empty:
+                        print(f"Failed to get data (attempt {retry_count + 1}/{max_retries}). Retrying in 10 seconds...")
+                        retry_count += 1
+                        time.sleep(10)
+                        continue
+                    break
+                
+                if df_hist.empty:
+                    print("Could not fetch data after retries. Waiting 30 seconds before retry...")
+                    time.sleep(30)
+                    continue
+                
+                df_hist = compute_features(df_hist)
+                if df_hist.empty:
+                    print("Features computation failed. Waiting 30 seconds before retry...")
+                    time.sleep(30)
+                    continue
+                
+                fixed_horizons = [1, 5, 15, 120, 480, 1440]
+                data = create_multi_horizon_dataset(df_hist, horizons=fixed_horizons)
+                
+                if data.empty:
+                    print("Dataset creation failed. Waiting 30 seconds before retry...")
+                    time.sleep(30)
+                    continue
+                
+                models = train_models(data)
+                print("Models ready. Updating every 15 seconds...")
+            
+            # Update forecasts
             df_live = get_live_data("AAPL", period="3d", interval="1m")
-            df_live = compute_features(df_live)
             if not df_live.empty:
-                latest_csv = generate_forecast_csv(df_live, models)
+                df_live = compute_features(df_live)
+                if not df_live.empty:
+                    latest_csv = generate_forecast_csv(df_live, models)
+                    print(f"Forecast updated at {datetime.utcnow().isoformat()}")
+            
             time.sleep(15)
         except Exception as e:
-            print(f"Error: {e}")
-            time.sleep(15)
+            print(f"Error in forecast loop: {e}")
+            models = None  # Reset models on error
+            time.sleep(30)
 
 # ==================== Flask route ====================
 @app.route('/forecast.csv')
